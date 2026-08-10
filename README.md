@@ -61,5 +61,7 @@ Los números del PDF se generan programáticamente desde `results/*.json`; no se
 
 ## Requisitos
 
-Python 3.11+ y las dependencias de [`requirements.txt`](requirements.txt) (PyTorch CPU es suficiente;
-la ejecución completa toma ~1 hora en 4 núcleos).
+Python 3.11+ y las dependencias de [`requirements.txt`](requirements.txt). PyTorch CPU es suficiente:
+la ejecución completa (12 iteraciones + reentrenamiento de los dos modelos finales) toma
+**alrededor de 2 horas en 4 núcleos**, sin GPU. Como la búsqueda es reanudable, se puede cortar y
+retomar sin perder trabajo.
