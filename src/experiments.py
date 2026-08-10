@@ -24,6 +24,7 @@ from .train import SEED, final_test_evaluation
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 ITERATIONS_PATH = RESULTS_DIR / "iterations.json"
 FINAL_TEST_PATH = RESULTS_DIR / "final_test.json"
+DATA_META_PATH = RESULTS_DIR / "data_meta.json"
 
 MLP_EPOCHS = 10
 CNN_EPOCHS = 8
@@ -129,6 +130,9 @@ def run_search(device: torch.device | None = None, force: bool = False) -> list[
     # Los DataLoaders solo dependen del batch_size, que es constante en esta
     # busqueda; se construyen una sola vez para no releer MNIST 12 veces.
     loaders, meta = build_dataloaders(batch_size=configs[0]["batch_size"])
+    # Se persiste para que el reporte cite las cifras reales del split y de la
+    # normalizacion sin tener que volver a cargar el dataset.
+    DATA_META_PATH.write_text(json.dumps(meta, indent=2))
     print(f"Datos: train={meta['n_train']} val={meta['n_val']} test={meta['n_test']}", flush=True)
 
     for cfg in configs:

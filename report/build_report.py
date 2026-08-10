@@ -90,6 +90,9 @@ PCT = lambda v: f"{v * 100:.2f}%"
 F4 = lambda v: f"{v:.4f}"
 INT = lambda v: f"{int(v):,}"
 SEC = lambda v: f"{v:.1f}"
+# En prosa se separan los miles con espacio duro (convencion SI/espanol); en las
+# tablas se deja la coma, que es mas compacta.
+MIL = lambda v: f"{int(v):,}".replace(",", "&nbsp;")
 
 
 # --------------------------------------------------------------------------
@@ -152,6 +155,31 @@ def layers_section() -> str:
     )
 
 
+def data_section(ctx: dict) -> str:
+    """Resumen del dataset y del protocolo. Las cifras del split salen de results/."""
+    return f"""
+<p><b>Dataset.</b> MNIST: <b>70&nbsp;000</b> imagenes de digitos manuscritos (60&nbsp;000 de entrenamiento +
+10&nbsp;000 de test) en <b>10 clases</b> (0&ndash;9). Cada imagen es de <b>28&times;28 pixeles</b> en escala de
+grises, con valores enteros en <code>[0, 255]</code> que <code>ToTensor()</code> escala a
+<code>[0, 1]</code>. Las clases estan <i>aproximadamente</i> balanceadas: van del ~9.0% (digito 5) al
+~11.2% (digito 1), razon max/min &asymp; 1.23. Ese desbalance leve no exige remuestreo, pero si
+justifica reportar metricas <b>macro</b> y estratificar el split.</p>
+
+<p><b>Normalizacion.</b> Necesaria. Ademas del escalado a <code>[0, 1]</code> se estandariza con
+<code>Normalize(&mu;={ctx['norm_mean']:.4f}, &sigma;={ctx['norm_std']:.4f})</code>: como ~80% de los pixeles
+son fondo negro, sin centrar la entrada media queda lejos de 0 y el descenso de gradiente zigzaguea.
+Ambos estadisticos se calculan <b>solo sobre el split de entrenamiento</b> para no filtrar informacion
+de validacion ni de test hacia el preprocesamiento.</p>
+
+<p><b>Particion y protocolo.</b> {MIL(ctx["n_train"])} entrenamiento / {MIL(ctx["n_val"])} validacion
+(estratificado, <code>random_state=23236</code>) + {MIL(ctx["n_test"])} test. Toda la seleccion de
+hiperparametros se hace mirando <b>solo validacion</b>; el conjunto de test se evalua <b>una unica
+vez</b> al final, con la mejor configuracion ya congelada. Semilla 23236 fijada en <code>random</code>,
+<code>numpy</code> y <code>torch</code> al inicio de cada iteracion, de modo que las diferencias entre
+iteraciones sean atribuibles al hiperparametro y no a la inicializacion.</p>
+"""
+
+
 def concepts_section(ctx: dict) -> str:
     return f"""
 <p><b>Tensor.</b> Es el arreglo multidimensional que PyTorch usa para todos los datos y parametros.
@@ -170,9 +198,9 @@ locales y las ultimas ya abarcan buena parte del digito, que es lo que permite r
 neurona solo se conecta a una ventana de k&times;k pixeles, no a los 784. (2) <i>Pesos compartidos</i>: el mismo
 filtro se reutiliza en todas las posiciones de la imagen, asi que su costo no escala con la resolucion.
 Un <code>Conv2d(1, 32, 3)</code> tiene solo 320 parametros y produce 32 mapas de 28&times;28, mientras que una
-capa densa <code>Linear(784, 32)</code> necesita 25 120 parametros y ademas destruye la estructura espacial al
+capa densa <code>Linear(784, 32)</code> necesita 25&nbsp;120 parametros y ademas destruye la estructura espacial al
 aplanar. Esa diferencia es exactamente la que se observa en los resultados: la CNN ganadora usa
-{esc(f"{ctx['cnn_params']:,}")} parametros contra {esc(f"{ctx['mlp_params']:,}")} del MLP
+{MIL(ctx["cnn_params"])} parametros contra {MIL(ctx["mlp_params"])} del MLP
 ({esc(ctx['param_ratio'])}) y aun asi obtiene mejor desempeno en test.</p>
 """
 
@@ -180,7 +208,7 @@ aplanar. Esa diferencia es exactamente la que se observa en los resultados: la C
 # --------------------------------------------------------------------------
 # Contexto derivado de los resultados reales
 # --------------------------------------------------------------------------
-def build_context(iterations: list[dict], final_test: dict) -> dict:
+def build_context(iterations: list[dict], final_test: dict, data_meta: dict) -> dict:
     mlp = final_test["MLP"]
     cnn = final_test["CNN"]
     cnn_cfg = cnn["config"]
@@ -199,7 +227,11 @@ def build_context(iterations: list[dict], final_test: dict) -> dict:
         jump *= 2
 
     winner = "CNN" if cnn["test_metrics"]["accuracy"] >= mlp["test_metrics"]["accuracy"] else "MLP"
-    loser = "MLP" if winner == "CNN" else "CNN"
+
+    # Reduccion relativa del error de la CNN respecto al MLP.
+    err_mlp = 1 - mlp["test_metrics"]["accuracy"]
+    err_cnn = 1 - cnn["test_metrics"]["accuracy"]
+    err_reduction = (1 - err_cnn / err_mlp) * 100 if err_mlp > 0 else 0.0
 
     return {
         "mlp": mlp,
@@ -212,14 +244,15 @@ def build_context(iterations: list[dict], final_test: dict) -> dict:
         "impact": impact,
         "gaps": gaps,
         "winner": winner,
-        "loser": loser,
         "acc_gap_pp": abs(cnn["test_metrics"]["accuracy"] - mlp["test_metrics"]["accuracy"]) * 100,
-        "err_reduction": (
-            (1 - cnn["test_metrics"]["accuracy"]) and
-            (1 - (1 - cnn["test_metrics"]["accuracy"]) / (1 - mlp["test_metrics"]["accuracy"])) * 100
-        ),
+        "err_reduction": err_reduction,
         "mlp_confusions": top_confusions(mlp["confusion_matrix"], 3),
         "cnn_confusions": top_confusions(cnn["confusion_matrix"], 3),
+        "n_train": data_meta["n_train"],
+        "n_val": data_meta["n_val"],
+        "n_test": data_meta["n_test"],
+        "norm_mean": data_meta["mean"],
+        "norm_std": data_meta["std"],
     }
 
 
@@ -256,7 +289,7 @@ posteriores y limitando el numero de epochs.</p>
 <p><b>4. MLP vs CNN en test.</b> Gano la <b>{esc(ctx['winner'])}</b>:
 {PCT(cnn['test_metrics']['accuracy'])} de accuracy frente a {PCT(mlp['test_metrics']['accuracy'])} del MLP
 ({ctx['acc_gap_pp']:.2f} puntos porcentuales, equivalente a reducir el error en {ctx['err_reduction']:.1f}%), y lo
-consigue con {esc(ctx['param_ratio'])} parametros ({cnn['n_params']:,} vs {mlp['n_params']:,}). La razon es
+consigue con {esc(ctx['param_ratio'])} parametros ({MIL(cnn['n_params'])} vs {MIL(mlp['n_params'])}). La razon es
 estructural: el MLP aplana la imagen y trata cada pixel como una feature independiente, de modo que pierde
 toda la informacion de vecindad y debe reaprender el mismo trazo en cada posicion. La CNN preserva la
 estructura 2D, comparte los filtros entre posiciones y construye el campo receptivo por etapas, asi que la
@@ -270,7 +303,7 @@ pocos fallos en digitos escritos de forma genuinamente ambigua.</p>
 
 <p><b>6. Modelo para produccion.</b> Elegiria la <b>CNN</b>. Domina en las dos dimensiones que importan a la
 vez: es mas exacta ({PCT(cnn['test_metrics']['accuracy'])} vs {PCT(mlp['test_metrics']['accuracy'])}) y mas
-liviana en memoria ({cnn['n_params']:,} parametros, {esc(ctx['param_ratio'])} que el MLP), asi que no hay
+liviana en memoria ({MIL(cnn['n_params'])} parametros, {esc(ctx['param_ratio'])} que el MLP), asi que no hay
 trade-off que negociar en cuanto a tamano del modelo. El unico costo es el computo por inferencia
 ({cnn['inference_ms_per_image']:.3f} ms/imagen en CPU contra {mlp['inference_ms_per_image']:.3f} ms del MLP) y un
 entrenamiento mas largo ({cnn['train_time_s']:.0f} s vs {mlp['train_time_s']:.0f} s), pero ambos siguen en el orden
@@ -284,8 +317,8 @@ def conclusions_section(ctx: dict) -> str:
     return f"""
 <ul>
 <li>La CNN alcanzo <b>{PCT(cnn['test_metrics']['accuracy'])}</b> de accuracy en test con
-<b>{cnn['n_params']:,}</b> parametros, contra <b>{PCT(mlp['test_metrics']['accuracy'])}</b> y
-<b>{mlp['n_params']:,}</b> del MLP: mas exactitud con {esc(ctx['param_ratio'])} parametros.</li>
+<b>{MIL(cnn['n_params'])}</b> parametros, contra <b>{PCT(mlp['test_metrics']['accuracy'])}</b> y
+<b>{MIL(mlp['n_params'])}</b> del MLP: mas exactitud con {esc(ctx['param_ratio'])} parametros.</li>
 <li>El numero de parametros no predice la calidad por si solo; lo que decide es si la arquitectura respeta
 la estructura del dato. El sesgo inductivo correcto (localidad + pesos compartidos) vale mas que la
 capacidad bruta.</li>
@@ -322,6 +355,9 @@ table.layers td:first-child { width: 15%; }
 table.layers td.params { width: 30%; font-size: 6pt; color: #555; }
 .figrow { display: flex; gap: 2.5mm; align-items: flex-start; margin-bottom: 1.6mm; }
 .figrow > div { flex: 1; }
+/* En la pagina 3 el espacio es el recurso escaso: se fija la altura de las
+   figuras para que el bloque de discusion quepa completo sin desbordar. */
+.figrow.compact img { height: 34mm; width: auto; display: block; margin: 0 auto; }
 .caption { font-size: 6.2pt; color: #666; text-align: center; margin-top: 0.3mm; }
 .page-break { break-before: page; }
 .footer { margin-top: 3mm; padding-top: 1.5mm; border-top: 1pt solid #1f4e79; font-size: 7.2pt; }
@@ -329,8 +365,8 @@ table.layers td.params { width: 30%; font-size: 6pt; color: #555; }
 """
 
 
-def build_html(iterations: list[dict], final_test: dict) -> str:
-    ctx = build_context(iterations, final_test)
+def build_html(iterations: list[dict], final_test: dict, data_meta: dict) -> str:
+    ctx = build_context(iterations, final_test, data_meta)
 
     # Texto de regularizacion derivado de los deltas reales de cada arquitectura.
     reg_rows = []
@@ -343,8 +379,11 @@ def build_html(iterations: list[dict], final_test: dict) -> str:
                     f"en el {arch}, {row['Cambio'].split(':')[-1].strip()} {verb} el F1 de validacion "
                     f"en {row['Delta F1']:+.4f}"
                 )
+    # capitalize() bajaria a minusculas el resto de la frase ("MLP" -> "mlp"),
+    # asi que solo se levanta la primera letra.
+    upper_first = lambda s: s[0].upper() + s[1:]
     ctx["reg_text"] = (
-        (". ".join(s.capitalize() for s in reg_rows) + ". ") if reg_rows else ""
+        (". ".join(upper_first(s) for s in reg_rows) + ". ") if reg_rows else ""
     ) + (
         "En MNIST la regularizacion rinde poco porque el dataset es grande y limpio en relacion con el "
         "tamano de los modelos, asi que hay poco margen de memorizacion que corregir; BatchNorm ayuda mas "
@@ -388,12 +427,19 @@ def build_html(iterations: list[dict], final_test: dict) -> str:
 {layers_section()}
 {concepts_section(ctx)}
 
+<h2>2. Datos y protocolo experimental</h2>
+<div class="figrow">
+  <div style="flex: 1.15">{data_section(ctx)}</div>
+  <div style="flex: 0.85">{img_tag("class_distribution.png")}
+    <div class="caption">Distribucion de clases en entrenamiento: desbalance leve (~9%&ndash;11%)</div></div>
+</div>
+
 <div class="page-break"></div>
 
-<h2>2. Resultados de las iteraciones (12 iteraciones: 6 MLP + 6 CNN)</h2>
+<h2>3. Resultados de las iteraciones (12 iteraciones: 6 MLP + 6 CNN)</h2>
 <p>Busqueda sistematica cambiando <b>una variable a la vez</b> respecto de la iteracion previa, de modo que
 cada delta de metrica sea atribuible a un unico cambio. Las metricas son <b>macro</b> y estan calculadas
-sobre el conjunto de <b>validacion</b> (6 000 imagenes); el conjunto de test no se toco durante la busqueda.</p>
+sobre el conjunto de <b>validacion</b> (6&nbsp;000 imagenes); el conjunto de test no se toco durante la busqueda.</p>
 {it_html}
 
 <div class="figrow">
@@ -401,21 +447,24 @@ sobre el conjunto de <b>validacion</b> (6 000 imagenes); el conjunto de test no 
   <div>{img_tag("loss_curves_cnn.png")}<div class="caption">Curvas de perdida &mdash; CNN (6 iteraciones; continua = train, punteada = val)</div></div>
 </div>
 
+<div style="text-align:center">{img_tag("val_metrics_by_iteration.png", width="74%")}</div>
+<div class="caption">Accuracy de validacion por iteracion; el borde negro marca la mejor de cada arquitectura</div>
+
 <div class="page-break"></div>
 
-<h2>3. Comparacion de arquitecturas (conjunto de test, una sola evaluacion)</h2>
+<h2>4. Comparacion de arquitecturas (conjunto de test, una sola evaluacion)</h2>
 <p>Mejor configuracion de cada arquitectura segun F1-macro de validacion:
 <b>MLP {esc(best_mlp['best_iteration_id'])}</b> ({esc(describe_config(best_mlp['config']))}) y
 <b>CNN {esc(best_cnn['best_iteration_id'])}</b> ({esc(describe_config(best_cnn['config']))}).</p>
 {cmp_html}
 
-<div class="figrow">
+<div class="figrow compact">
   <div>{img_tag("params_vs_accuracy.png")}<div class="caption">Parametros vs. accuracy en test</div></div>
   <div>{img_tag("confusion_mlp.png")}<div class="caption">Matriz de confusion &mdash; MLP</div></div>
   <div>{img_tag("confusion_cnn.png")}<div class="caption">Matriz de confusion &mdash; CNN</div></div>
 </div>
 
-<h2>4. Discusion y analisis</h2>
+<h2>5. Discusion y analisis</h2>
 {discussion_section(ctx)}
 
 <h3>Conclusiones</h3>
@@ -444,9 +493,13 @@ def main() -> int:
         raise SystemExit(f"Se esperaban 12 iteraciones, hay {len(iterations)}")
     if not final_test:
         raise SystemExit("Falta results/final_test.json")
+    meta_path = ROOT / "results" / "data_meta.json"
+    if not meta_path.exists():
+        raise SystemExit("Falta results/data_meta.json (lo genera src/experiments.py)")
+    data_meta = json.loads(meta_path.read_text())
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    HTML_PATH.write_text(build_html(iterations, final_test), encoding="utf-8")
+    HTML_PATH.write_text(build_html(iterations, final_test, data_meta), encoding="utf-8")
     print(f"HTML generado: {HTML_PATH}")
 
     chromium = find_chromium()
