@@ -97,22 +97,43 @@ def top_confusions(cm, k: int = 5) -> list[tuple[int, int, int]]:
     return pairs[:k]
 
 
+def parent_map() -> dict[str, str | None]:
+    """De que iteracion se deriva cada una, segun la definicion de la busqueda.
+
+    La busqueda es un arbol, no una cadena: C3 y C4 son dos ramas distintas de
+    C2. Comparar contra la fila anterior de la tabla atribuiria a C4 el efecto
+    de "volver a MaxPool y ademas agregar BatchNorm", que son dos cambios.
+    """
+    from .experiments import all_configs
+
+    return {c["id"]: c.get("parent") for c in all_configs()}
+
+
 def hyperparameter_impact(iterations: list[dict], arch: str) -> pd.DataFrame:
     """Delta de F1-macro de validacion que produjo cada cambio de hiperparametro.
 
-    Responde directamente la primera pregunta de la seccion 6: que cambio tuvo
-    el mayor impacto positivo y cual el mayor impacto negativo.
+    El delta se mide siempre contra la iteracion **padre**, que es la que difiere
+    en una sola variable. Responde la primera pregunta de la seccion 6: que
+    cambio tuvo el mayor impacto positivo y cual el mayor impacto negativo.
     """
-    rows = [r for r in iterations if r["arch"] == arch]
+    by_id = {r["id"]: r for r in iterations}
+    parents = parent_map()
     out = []
-    for prev, cur in zip(rows, rows[1:]):
+    for r in iterations:
+        if r["arch"] != arch:
+            continue
+        parent_id = parents.get(r["id"])
+        if parent_id is None or parent_id not in by_id:
+            continue  # la baseline no mide ningun cambio
+        base = by_id[parent_id]
         out.append(
             {
-                "Iteracion": cur["id"],
-                "Cambio": cur["change"],
-                "F1 previo": prev["val_metrics"]["f1_macro"],
-                "F1 nuevo": cur["val_metrics"]["f1_macro"],
-                "Delta F1": cur["val_metrics"]["f1_macro"] - prev["val_metrics"]["f1_macro"],
+                "Iteracion": r["id"],
+                "Base": parent_id,
+                "Cambio": r["change"],
+                "F1 base": base["val_metrics"]["f1_macro"],
+                "F1 nuevo": r["val_metrics"]["f1_macro"],
+                "Delta F1": r["val_metrics"]["f1_macro"] - base["val_metrics"]["f1_macro"],
             }
         )
     return pd.DataFrame(out).sort_values("Delta F1", ascending=False).reset_index(drop=True)

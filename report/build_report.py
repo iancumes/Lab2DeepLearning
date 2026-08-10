@@ -115,9 +115,9 @@ LAYERS = [
     ),
     (
         "nn.AvgPool2d",
-        "Igual que MaxPool2d pero promediando la ventana. Suaviza el mapa de activacion en vez de "
-        "quedarse con el pico; tiende a diluir trazos finos, lo que en MNIST suele costar algo de "
-        "accuracy frente a MaxPool.",
+        "Igual que MaxPool2d pero promediando la ventana: suaviza el mapa de activacion en vez de "
+        "quedarse con el pico, conservando cuanta señal habia en la region y no solo su maximo. "
+        "Cual de los dos conviene es empirico; aqui AvgPool resulto mejor (ver iteracion C3).",
         "kernel_size, stride, padding, count_include_pad",
     ),
     (
@@ -387,10 +387,12 @@ def build_html(iterations: list[dict], final_test: dict, data_meta: dict) -> str
     ctx["reg_text"] = (
         (". ".join(upper_first(s) for s in reg_rows) + ". ") if reg_rows else ""
     ) + (
-        "En MNIST la regularizacion rinde poco porque el dataset es grande y limpio en relacion con el "
-        "tamano de los modelos, asi que hay poco margen de memorizacion que corregir; BatchNorm ayuda mas "
-        "por su efecto en la optimizacion (gradientes mejor condicionados, convergencia mas rapida) que por "
-        "su efecto regularizador."
+        "No hay un metodo que gane en las dos arquitecturas: BatchNorm fue claramente util en el MLP "
+        "pero perjudicial en la CNN, mientras que Dropout hizo lo contrario. La lectura es que en MNIST "
+        "la regularizacion rinde en proporcion al overfitting que hay que corregir, y con 54&nbsp;000 "
+        "ejemplos limpios frente a modelos de unos cientos de miles de parametros ese margen es estrecho: "
+        "los deltas son de milesimas y quedan dentro del ruido esperable entre corridas. Con ese tamano "
+        "de efecto, lo honesto es no declarar un ganador general sino elegir por arquitectura."
     )
 
     it_df = iterations_table(iterations)

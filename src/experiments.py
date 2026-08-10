@@ -43,21 +43,29 @@ def mlp_configs() -> list[dict]:
         epochs=MLP_EPOCHS,
         seed=SEED,
     )
+    # `parent` indica de que iteracion se deriva cada una: el efecto de un cambio
+    # se mide siempre contra su padre, no contra la fila anterior de la tabla.
     cfgs = []
 
-    cfgs.append({**base, "id": "M1", "change": "Baseline: 1 capa oculta de 128, SGD lr=0.01"})
-    cfgs.append({**base, "id": "M2", "change": "Optimizador SGD -> Adam (lr=1e-3)", "optimizer": "adam", "lr": 1e-3})
+    cfgs.append({**base, "id": "M1", "parent": None,
+                 "change": "Baseline: 1 capa oculta de 128, SGD lr=0.01"})
+    cfgs.append({**base, "id": "M2", "parent": "M1", "optimizer": "adam", "lr": 1e-3,
+                 "change": "Optimizador SGD -> Adam (lr=1e-3)"})
 
-    m3 = {**cfgs[-1], "id": "M3", "change": "Ancho de la capa oculta 128 -> 256", "hidden_sizes": (256,)}
+    m3 = {**cfgs[-1], "id": "M3", "parent": "M2", "hidden_sizes": (256,),
+          "change": "Ancho de la capa oculta 128 -> 256"}
     cfgs.append(m3)
 
-    m4 = {**m3, "id": "M4", "change": "Profundidad: 1 -> 2 capas ocultas (256, 128)", "hidden_sizes": (256, 128)}
+    m4 = {**m3, "id": "M4", "parent": "M3", "hidden_sizes": (256, 128),
+          "change": "Profundidad: 1 -> 2 capas ocultas (256, 128)"}
     cfgs.append(m4)
 
-    m5 = {**m4, "id": "M5", "change": "Regularizacion: + Dropout 0.3", "dropout": 0.3}
+    m5 = {**m4, "id": "M5", "parent": "M4", "dropout": 0.3,
+          "change": "Regularizacion: + Dropout 0.3"}
     cfgs.append(m5)
 
-    m6 = {**m5, "id": "M6", "change": "Normalizacion: + BatchNorm1d", "use_bn": True}
+    m6 = {**m5, "id": "M6", "parent": "M5", "use_bn": True,
+          "change": "Normalizacion: + BatchNorm1d"}
     cfgs.append(m6)
 
     return cfgs
@@ -81,22 +89,29 @@ def cnn_configs() -> list[dict]:
     )
     cfgs = []
 
-    cfgs.append({**base, "id": "C1", "change": "Baseline: 2 bloques conv (16, 32), MaxPool, Adam lr=1e-3"})
+    cfgs.append({**base, "id": "C1", "parent": None,
+                 "change": "Baseline: 2 bloques conv (16, 32), MaxPool, Adam lr=1e-3"})
 
-    c2 = {**base, "id": "C2", "change": "Capacidad: canales (16,32) -> (32,64)", "channels": (32, 64)}
+    c2 = {**base, "id": "C2", "parent": "C1", "channels": (32, 64),
+          "change": "Capacidad: canales (16,32) -> (32,64)"}
     cfgs.append(c2)
 
-    c3 = {**c2, "id": "C3", "change": "Pooling: MaxPool2d -> AvgPool2d", "pool": "avg"}
+    # C3 es una rama de C2 que aisla el tipo de pooling; la linea principal
+    # (C4-C6) continua desde C2 con MaxPool para no mezclar dos cambios.
+    c3 = {**c2, "id": "C3", "parent": "C2", "pool": "avg",
+          "change": "Pooling: MaxPool2d -> AvgPool2d"}
     cfgs.append(c3)
 
-    # C4 se construye sobre el mejor pooling encontrado; se resuelve en runtime.
-    c4 = {**c2, "id": "C4", "change": "Normalizacion: + BatchNorm2d", "use_bn": True}
+    c4 = {**c2, "id": "C4", "parent": "C2", "use_bn": True,
+          "change": "Normalizacion: + BatchNorm2d"}
     cfgs.append(c4)
 
-    c5 = {**c4, "id": "C5", "change": "Regularizacion: + Dropout 0.25 antes de la FC final", "dropout": 0.25}
+    c5 = {**c4, "id": "C5", "parent": "C4", "dropout": 0.25,
+          "change": "Regularizacion: + Dropout 0.25 antes de la FC final"}
     cfgs.append(c5)
 
-    c6 = {**c5, "id": "C6", "change": "Profundidad: 2 -> 3 bloques conv (32, 64, 128)", "channels": (32, 64, 128)}
+    c6 = {**c5, "id": "C6", "parent": "C5", "channels": (32, 64, 128),
+          "change": "Profundidad: 2 -> 3 bloques conv (32, 64, 128)"}
     cfgs.append(c6)
 
     return cfgs
