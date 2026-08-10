@@ -162,7 +162,7 @@ def data_section(ctx: dict) -> str:
 10&nbsp;000 de test) en <b>10 clases</b> (0&ndash;9). Cada imagen es de <b>28&times;28 pixeles</b> en escala de
 grises, con valores enteros en <code>[0, 255]</code> que <code>ToTensor()</code> escala a
 <code>[0, 1]</code>. Las clases estan <i>aproximadamente</i> balanceadas: van del ~9.0% (digito 5) al
-~11.2% (digito 1), razon max/min &asymp; 1.23. Ese desbalance leve no exige remuestreo, pero si
+~11.2% (digito 1), razon max/min &asymp; 1.24. Ese desbalance leve no exige remuestreo, pero si
 justifica reportar metricas <b>macro</b> y estratificar el split.</p>
 
 <p><b>Normalizacion.</b> Necesaria. Ademas del escalado a <code>[0, 1]</code> se estandariza con
@@ -191,8 +191,9 @@ imagenes es un tensor <code>(N, 1, 28, 28)</code> y el MLP lo convierte en <code
 una capa profunda. Crece de forma incremental: <code>RF_out = RF_in + (k - 1) &middot; jump</code>, donde
 <code>jump</code> es el producto de los strides acumulados. En la CNN ganadora
 ({esc(ctx['cnn_blocks'])} bloques conv 3&times;3 con pooling 2&times;2) el campo receptivo final es de
-<b>{esc(ctx['receptive_field'])}&times;{esc(ctx['receptive_field'])} pixeles</b>: las primeras capas ven trazos
-locales y las ultimas ya abarcan buena parte del digito, que es lo que permite reconocer la forma completa.</p>
+<b>{esc(ctx['receptive_field'])}&times;{esc(ctx['receptive_field'])} pixeles</b>, es decir
+{esc(ctx['rf_coverage'])}% del ancho de la imagen: la primera capa solo ve trazos de 3&times;3 y cada bloque
+adicional amplia esa ventana, de modo que apilar capas hace crecer el contexto sin agrandar el kernel.</p>
 
 <p><b>Por que la CNN necesita menos parametros.</b> Por dos mecanismos. (1) <i>Conectividad local</i>: cada
 neurona solo se conecta a una ventana de k&times;k pixeles, no a los 784. (2) <i>Pesos compartidos</i>: el mismo
@@ -241,6 +242,7 @@ def build_context(iterations: list[dict], final_test: dict, data_meta: dict) -> 
         "param_ratio": ratio_txt,
         "cnn_blocks": len(cnn_cfg["channels"]),
         "receptive_field": rf,
+        "rf_coverage": f"{min(rf, 28) / 28 * 100:.0f}",
         "impact": impact,
         "gaps": gaps,
         "winner": winner,
