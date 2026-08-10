@@ -155,6 +155,19 @@ def layers_section() -> str:
     )
 
 
+def efficiency_note(ctx: dict) -> str:
+    """Evidencia empirica de eficiencia en parametros, si la busqueda la produjo."""
+    eff, mlp_it = ctx["efficient"], ctx["best_mlp_it"]
+    if eff is None:
+        return ""
+    return (
+        f" La eficiencia en parametros si se ve al comparar iteraciones: <b>{esc(eff['id'])}</b> "
+        f"({MIL(eff['n_params'])} parametros) supera al mejor MLP <b>{esc(mlp_it['id'])}</b> "
+        f"({MIL(mlp_it['n_params'])}) en F1 de validacion &mdash; {PCT(eff['val_metrics']['f1_macro'])} "
+        f"contra {PCT(mlp_it['val_metrics']['f1_macro'])} &mdash; usando <b>menos</b> parametros que el."
+    )
+
+
 def data_section(ctx: dict) -> str:
     """Resumen del dataset y del protocolo. Las cifras del split salen de results/."""
     return f"""
@@ -200,9 +213,15 @@ neurona solo se conecta a una ventana de k&times;k pixeles, no a los 784. (2) <i
 filtro se reutiliza en todas las posiciones de la imagen, asi que su costo no escala con la resolucion.
 Un <code>Conv2d(1, 32, 3)</code> tiene solo 320 parametros y produce 32 mapas de 28&times;28, mientras que una
 capa densa <code>Linear(784, 32)</code> necesita 25&nbsp;120 parametros y ademas destruye la estructura espacial al
-aplanar. Esa diferencia es exactamente la que se observa en los resultados: la CNN ganadora usa
-{MIL(ctx["cnn_params"])} parametros contra {MIL(ctx["mlp_params"])} del MLP
-({esc(ctx['param_ratio'])}) y aun asi obtiene mejor desempeno en test.</p>
+aplanar.</p>
+
+<p><b>Matiz importante que muestran los resultados.</b> El ahorro es real <i>por capa</i>, pero no se
+traduce automaticamente en un modelo total mas chico: la CNN ganadora usa {MIL(ctx['cnn_params'])}
+parametros, {esc(ctx['param_ratio'])} que el MLP. La razon aparece al desglosarla: solo
+<b>{MIL(ctx['conv_params'])} ({ctx['conv_pct']:.1f}%)</b> estan en los bloques convolucionales y
+<b>{MIL(ctx['head_params'])} ({ctx['head_pct']:.1f}%)</b> en la cabeza densa posterior al
+<code>Flatten</code>. Es decir: la parte convolucional es baratisima y casi todo el costo lo pone el
+clasificador denso, que es justamente el componente de tipo MLP.{efficiency_note(ctx)}</p>
 """
 
 
@@ -227,6 +246,29 @@ def build_context(iterations: list[dict], final_test: dict, data_meta: dict) -> 
         rf += jump
         jump *= 2
 
+    # Reparto de parametros de la CNN ganadora entre la parte convolucional y la
+    # cabeza densa. Se calcula analiticamente para no depender de torch aqui.
+    conv_params, prev_c = 0, 1
+    for c in cnn_cfg["channels"]:
+        conv_params += c * (prev_c * k * k) + c
+        if cnn_cfg.get("use_bn"):
+            conv_params += 2 * c  # gamma y beta de BatchNorm2d
+        prev_c = c
+    head_params = cnn["n_params"] - conv_params
+
+    # Evidencia directa de eficiencia en parametros: la CNN mas pequena que
+    # supera al mejor MLP usando menos parametros que el.
+    best_mlp_it = max(
+        (r for r in iterations if r["arch"] == "MLP"), key=lambda r: r["val_metrics"]["f1_macro"]
+    )
+    cheaper = [
+        r for r in iterations
+        if r["arch"] == "CNN"
+        and r["val_metrics"]["f1_macro"] > best_mlp_it["val_metrics"]["f1_macro"]
+        and r["n_params"] < best_mlp_it["n_params"]
+    ]
+    efficient = min(cheaper, key=lambda r: r["n_params"]) if cheaper else None
+
     winner = "CNN" if cnn["test_metrics"]["accuracy"] >= mlp["test_metrics"]["accuracy"] else "MLP"
 
     # Reduccion relativa del error de la CNN respecto al MLP.
@@ -250,6 +292,12 @@ def build_context(iterations: list[dict], final_test: dict, data_meta: dict) -> 
         "err_reduction": err_reduction,
         "mlp_confusions": top_confusions(mlp["confusion_matrix"], 3),
         "cnn_confusions": top_confusions(cnn["confusion_matrix"], 3),
+        "conv_params": conv_params,
+        "head_params": head_params,
+        "conv_pct": conv_params / cnn["n_params"] * 100,
+        "head_pct": head_params / cnn["n_params"] * 100,
+        "efficient": efficient,
+        "best_mlp_it": best_mlp_it,
         "n_train": data_meta["n_train"],
         "n_val": data_meta["n_val"],
         "n_test": data_meta["n_test"],
@@ -286,16 +334,21 @@ baseline del MLP (M1, SGD sin momentum), donde ambas perdidas se quedaban altas 
 era capacidad sino velocidad de convergencia. Se mitigo con Dropout y BatchNorm en las iteraciones
 posteriores y limitando el numero de epochs.</p>
 
-<p><b>3. Efecto de la regularizacion.</b> {esc(ctx['reg_text'])}</p>
+<p><b>3. Efecto de la regularizacion.</b> {ctx['reg_text']}</p>
 
 <p><b>4. MLP vs CNN en test.</b> Gano la <b>{esc(ctx['winner'])}</b>:
 {PCT(cnn['test_metrics']['accuracy'])} de accuracy frente a {PCT(mlp['test_metrics']['accuracy'])} del MLP
-({ctx['acc_gap_pp']:.2f} puntos porcentuales, equivalente a reducir el error en {ctx['err_reduction']:.1f}%), y lo
-consigue con {esc(ctx['param_ratio'])} parametros ({MIL(cnn['n_params'])} vs {MIL(mlp['n_params'])}). La razon es
-estructural: el MLP aplana la imagen y trata cada pixel como una feature independiente, de modo que pierde
-toda la informacion de vecindad y debe reaprender el mismo trazo en cada posicion. La CNN preserva la
-estructura 2D, comparte los filtros entre posiciones y construye el campo receptivo por etapas, asi que la
-invarianza a pequenas traslaciones le sale "gratis" en vez de tener que aprenderla con mas pesos.</p>
+({ctx['acc_gap_pp']:.2f} puntos porcentuales, equivalente a reducir el error en {ctx['err_reduction']:.1f}%), con
+{esc(ctx['param_ratio'])} parametros ({MIL(cnn['n_params'])} vs {MIL(mlp['n_params'])}). Conviene no leer esa
+relacion al reves: la ventaja <b>no</b> viene de tener mas capacidad. La prueba es que
+{esc(ctx['efficient']['id']) if ctx['efficient'] else 'la CNN mas pequena'}, con
+{MIL(ctx['efficient']['n_params']) if ctx['efficient'] else '&mdash;'} parametros, ya supera al mejor MLP usando
+<i>menos</i> parametros que el; y que dentro de las propias CNN aumentar canales de (16,32) a (32,64)
+<i>empeoro</i> el F1. La razon es estructural: el MLP aplana la imagen y trata cada pixel como una feature
+independiente, de modo que pierde toda la informacion de vecindad y debe reaprender el mismo trazo en cada
+posicion. La CNN preserva la estructura 2D, comparte los filtros entre posiciones y construye el campo
+receptivo por etapas, asi que la invarianza a pequenas traslaciones le sale "gratis" en vez de tener que
+aprenderla con mas pesos.</p>
 
 <p><b>5. Tipos de error.</b> Las confusiones dominantes del MLP fueron {fmt_confusions(ctx['mlp_confusions'])}
 y las de la CNN {fmt_confusions(ctx['cnn_confusions'])}. Ambos modelos se equivocan sobre todo entre digitos
@@ -303,14 +356,18 @@ que comparten trazos (4/9, 3/5, 7/2), pero el MLP acumula ademas errores en pare
 la <i>posicion relativa</i> de los trazos, precisamente lo que se pierde al aplanar; la CNN concentra sus
 pocos fallos en digitos escritos de forma genuinamente ambigua.</p>
 
-<p><b>6. Modelo para produccion.</b> Elegiria la <b>CNN</b>. Domina en las dos dimensiones que importan a la
-vez: es mas exacta ({PCT(cnn['test_metrics']['accuracy'])} vs {PCT(mlp['test_metrics']['accuracy'])}) y mas
-liviana en memoria ({MIL(cnn['n_params'])} parametros, {esc(ctx['param_ratio'])} que el MLP), asi que no hay
-trade-off que negociar en cuanto a tamano del modelo. El unico costo es el computo por inferencia
-({cnn['inference_ms_per_image']:.3f} ms/imagen en CPU contra {mlp['inference_ms_per_image']:.3f} ms del MLP) y un
-entrenamiento mas largo ({cnn['train_time_s']:.0f} s vs {mlp['train_time_s']:.0f} s), pero ambos siguen en el orden
-de fracciones de milisegundo por imagen, muy por debajo de cualquier presupuesto de latencia realista para
-este problema. El entrenamiento se paga una sola vez; la exactitud se cobra en cada prediccion.</p>
+<p><b>6. Modelo para produccion.</b> Elegiria una <b>CNN</b>, pero reconociendo que aqui si hay un
+trade-off real y no fingiendo que la CNN domina en todo. La CNN ganadora es mas exacta
+({PCT(cnn['test_metrics']['accuracy'])} vs {PCT(mlp['test_metrics']['accuracy'])}) pero tambien mas pesada
+({MIL(cnn['n_params'])} parametros, {esc(ctx['param_ratio'])} que el MLP) y mas lenta en inferencia
+({cnn['inference_ms_per_image']:.3f} ms/imagen en CPU contra {mlp['inference_ms_per_image']:.3f} ms del MLP,
+es decir {cnn['inference_ms_per_image'] / mlp['inference_ms_per_image']:.1f}&times;). Aun asi la eleccion es clara:
+{ctx['acc_gap_pp']:.2f} puntos porcentuales equivalen a {ctx['err_reduction']:.0f}% menos errores, y a escala de
+produccion cada error mal clasificado cuesta intervencion manual, que es ordenes de magnitud mas cara que
+{cnn['inference_ms_per_image']:.3f} ms de CPU.{
+    f" Si la memoria fuera la restriccion vinculante, la configuracion a desplegar seria {esc(ctx['efficient']['id'])}: {MIL(ctx['efficient']['n_params'])} parametros, menos que el MLP, y aun por encima de el en validacion."
+    if ctx['efficient'] else ""
+} El MLP solo ganaria en un dispositivo incapaz de ejecutar convoluciones de forma eficiente.</p>
 """
 
 
@@ -318,16 +375,18 @@ def conclusions_section(ctx: dict) -> str:
     cnn, mlp = ctx["cnn"], ctx["mlp"]
     return f"""
 <ul>
-<li>La CNN alcanzo <b>{PCT(cnn['test_metrics']['accuracy'])}</b> de accuracy en test con
-<b>{MIL(cnn['n_params'])}</b> parametros, contra <b>{PCT(mlp['test_metrics']['accuracy'])}</b> y
-<b>{MIL(mlp['n_params'])}</b> del MLP: mas exactitud con {esc(ctx['param_ratio'])} parametros.</li>
-<li>El numero de parametros no predice la calidad por si solo; lo que decide es si la arquitectura respeta
-la estructura del dato. El sesgo inductivo correcto (localidad + pesos compartidos) vale mas que la
-capacidad bruta.</li>
-<li>La busqueda de una variable a la vez fue lo que permitio atribuir cada cambio de metrica a su causa;
-una busqueda aleatoria habria dado el mismo mejor modelo pero ninguna explicacion.</li>
-<li>Los dos modelos convergen en pocas epochs sobre MNIST, de modo que el cuello de botella practico no fue
-la capacidad sino la regularizacion y la eleccion del optimizador.</li>
+<li>La CNN alcanzo <b>{PCT(cnn['test_metrics']['accuracy'])}</b> de accuracy en test contra
+<b>{PCT(mlp['test_metrics']['accuracy'])}</b> del MLP: {ctx['err_reduction']:.0f}% menos errores.</li>
+<li>El numero de parametros no predice la calidad: la CNN ganadora tiene {esc(ctx['param_ratio'])}
+parametros que el MLP, pero {esc(ctx['efficient']['id']) if ctx['efficient'] else 'una CNN mas pequena'} lo
+supera con <i>menos</i>, y subir canales de (16,32) a (32,64) empeoro el resultado. Lo que decide es si la
+arquitectura respeta la estructura del dato, no cuanta capacidad tiene.</li>
+<li>El costo en parametros de una CNN no esta en las convoluciones ({ctx['conv_pct']:.1f}% del total) sino
+en la cabeza densa ({ctx['head_pct']:.1f}%): para achicar el modelo hay que atacar el clasificador, no los
+filtros.</li>
+<li>Varias intuiciones estandar no sobrevivieron a la medicion: AvgPool2d supero a MaxPool2d, mas canales
+empeoraron el resultado y BatchNorm2d perjudico a la CNN. Medir una variable a la vez fue lo que permitio
+detectarlo y atribuir cada cambio a su causa.</li>
 </ul>
 """
 
@@ -359,10 +418,10 @@ table.layers td.params { width: 30%; font-size: 6pt; color: #555; }
 .figrow > div { flex: 1; }
 /* En la pagina 3 el espacio es el recurso escaso: se fija la altura de las
    figuras para que el bloque de discusion quepa completo sin desbordar. */
-.figrow.compact img { height: 34mm; width: auto; display: block; margin: 0 auto; }
+.figrow.compact img { height: 27mm; width: auto; display: block; margin: 0 auto; }
 .caption { font-size: 6.2pt; color: #666; text-align: center; margin-top: 0.3mm; }
 .page-break { break-before: page; }
-.footer { margin-top: 3mm; padding-top: 1.5mm; border-top: 1pt solid #1f4e79; font-size: 7.2pt; }
+.footer { margin-top: 1.5mm; padding-top: 1mm; border-top: 1pt solid #1f4e79; font-size: 7.2pt; }
 .highlight { background: #fff8e1; }
 """
 
@@ -377,8 +436,9 @@ def build_html(iterations: list[dict], final_test: dict, data_meta: dict) -> str
         for _, row in imp.iterrows():
             if "Dropout" in row["Cambio"] or "BatchNorm" in row["Cambio"]:
                 verb = "mejoro" if row["Delta F1"] > 0 else "empeoro"
+                art = "el" if arch == "MLP" else "la"  # el MLP / la CNN
                 reg_rows.append(
-                    f"en el {arch}, {row['Cambio'].split(':')[-1].strip()} {verb} el F1 de validacion "
+                    f"en {art} {arch}, {row['Cambio'].split(':')[-1].strip()} {verb} el F1 de validacion "
                     f"en {row['Delta F1']:+.4f}"
                 )
     # capitalize() bajaria a minusculas el resto de la frase ("MLP" -> "mlp"),
@@ -387,12 +447,11 @@ def build_html(iterations: list[dict], final_test: dict, data_meta: dict) -> str
     ctx["reg_text"] = (
         (". ".join(upper_first(s) for s in reg_rows) + ". ") if reg_rows else ""
     ) + (
-        "No hay un metodo que gane en las dos arquitecturas: BatchNorm fue claramente util en el MLP "
-        "pero perjudicial en la CNN, mientras que Dropout hizo lo contrario. La lectura es que en MNIST "
-        "la regularizacion rinde en proporcion al overfitting que hay que corregir, y con 54&nbsp;000 "
-        "ejemplos limpios frente a modelos de unos cientos de miles de parametros ese margen es estrecho: "
-        "los deltas son de milesimas y quedan dentro del ruido esperable entre corridas. Con ese tamano "
-        "de efecto, lo honesto es no declarar un ganador general sino elegir por arquitectura."
+        "Ningun metodo gana en ambas arquitecturas: BatchNorm ayudo al MLP pero perjudico a la CNN, y "
+        "Dropout hizo lo contrario. La regularizacion rinde en proporcion al overfitting que hay que "
+        "corregir, y con 54&nbsp;000 ejemplos limpios ese margen es estrecho: los deltas de la CNN son de "
+        "milesimas, dentro del ruido de una sola semilla, asi que lo honesto es elegir por arquitectura "
+        "y no declarar un ganador general."
     )
 
     it_df = iterations_table(iterations)
@@ -441,9 +500,11 @@ def build_html(iterations: list[dict], final_test: dict, data_meta: dict) -> str
 <div class="page-break"></div>
 
 <h2>3. Resultados de las iteraciones (12 iteraciones: 6 MLP + 6 CNN)</h2>
-<p>Busqueda sistematica cambiando <b>una variable a la vez</b> respecto de la iteracion previa, de modo que
-cada delta de metrica sea atribuible a un unico cambio. Las metricas son <b>macro</b> y estan calculadas
-sobre el conjunto de <b>validacion</b> (6&nbsp;000 imagenes); el conjunto de test no se toco durante la busqueda.</p>
+<p>Busqueda sistematica cambiando <b>una variable a la vez</b> respecto de la iteracion indicada en la
+columna <b>Base</b>, de modo que cada delta de metrica sea atribuible a un unico cambio. La busqueda es un
+arbol y no una cadena: C3 y C4 son dos ramas de C2, para no mezclar el cambio de pooling con el de
+normalizacion. Las metricas son <b>macro</b> sobre el conjunto de <b>validacion</b> (6&nbsp;000 imagenes); el
+conjunto de test no se toco durante la busqueda.</p>
 {it_html}
 
 <div class="figrow">

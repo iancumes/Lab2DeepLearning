@@ -40,14 +40,16 @@ def describe_config(cfg: dict) -> str:
 
 def iterations_table(iterations: list[dict]) -> pd.DataFrame:
     """Tabla de las 12 iteraciones con todo lo que exige el enunciado."""
+    parents = parent_map()
     rows = []
     for r in iterations:
         cfg = r["config"]
         rows.append(
             {
                 "ID": r["id"],
+                "Base": parents.get(r["id"]) or "—",
                 "Arq.": r["arch"],
-                "Cambio respecto a la anterior": r["change"],
+                "Cambio respecto a su base": r["change"],
                 "Configuracion": describe_config(cfg),
                 "Epochs": cfg["epochs"],
                 "Train loss": r["history"]["train_loss"][-1],
