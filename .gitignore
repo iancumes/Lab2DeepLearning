@@ -1,0 +1,18 @@
+# Datos descargados (MNIST se baja automaticamente, no se versiona)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Checkpoints de modelos
+*.pt
+*.pth
+
+# Artefactos intermedios del reporte
+report/report.html
